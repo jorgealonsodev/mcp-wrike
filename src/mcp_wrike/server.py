@@ -1,6 +1,7 @@
 """MCP server for Wrike project management."""
 
 import asyncio
+import html
 import re
 
 from mcp.server import Server
@@ -9,6 +10,45 @@ from mcp.types import TextContent, Tool
 
 from .auth import get_access_token
 from .client import WrikeClient
+
+# Wrike renders <input type="checkbox" /> in descriptions as a native checklist
+# item; the editor's own data-checked markup is stripped by the API.
+CHECKBOX_MARKUP = '<input type="checkbox" />'
+CHECKBOX_HINT = (
+    f" For a checklist item use {CHECKBOX_MARKUP} before the text"
+    ' (add checked="checked" to mark it done).'
+)
+_CHECKBOX_RE = re.compile(
+    r"<input\b[^>]*\btype\s*=\s*[\"']?checkbox[\"']?[^>]*>", re.IGNORECASE
+)
+_LABEL_END_RE = re.compile(r"<input\b|</p>|</li>|</div>|<br\b", re.IGNORECASE)
+_CHECKED_ATTR_RE = re.compile(
+    r"\s+checked(\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>/]+))?", re.IGNORECASE
+)
+
+
+def _find_checkboxes(description: str) -> list[tuple[re.Match, str, bool]]:
+    """Return (tag match, plain-text label, checked) for each checkbox."""
+    boxes = []
+    for match in _CHECKBOX_RE.finditer(description):
+        rest = description[match.end():]
+        end = _LABEL_END_RE.search(rest)
+        raw = rest[: end.start()] if end else rest
+        label = " ".join(html.unescape(re.sub(r"<[^>]+>", "", raw)).split())
+        checked = bool(_CHECKED_ATTR_RE.search(match.group(0)))
+        boxes.append((match, label, checked))
+    return boxes
+
+
+def _set_checked(tag: str, checked: bool) -> str:
+    """Return the checkbox tag with its checked attribute set or removed."""
+    tag = _CHECKED_ATTR_RE.sub("", tag)
+    if not checked:
+        return tag
+    if tag.endswith("/>"):
+        return tag[:-2].rstrip() + ' checked="checked" />'
+    return tag[:-1].rstrip() + ' checked="checked">'
+
 
 # Initialize MCP server
 server = Server("mcp-wrike")
@@ -334,7 +374,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "description": {
                         "type": "string",
-                        "description": "Task description (HTML allowed)",
+                        "description": "Task description (HTML allowed)"
+                        + CHECKBOX_HINT,
                     },
                     "status": {
                         "type": "string",
@@ -404,7 +445,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "description": {
                         "type": "string",
-                        "description": "New task description (HTML allowed)",
+                        "description": "New task description (HTML allowed)"
+                        + CHECKBOX_HINT,
                     },
                     "status": {
                         "type": "string",
@@ -502,7 +544,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "new_text": {
                         "type": "string",
-                        "description": "Replacement text or HTML fragment",
+                        "description": "Replacement text or HTML fragment"
+                        + CHECKBOX_HINT,
                     },
                     "replace_all": {
                         "type": "boolean",
@@ -511,6 +554,33 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["task_id", "old_text", "new_text"],
+            },
+        ),
+        Tool(
+            name="set_description_checkbox",
+            description=(
+                "Check or uncheck a checklist item in a task description,"
+                " found by its visible text. Only that checkbox changes;"
+                " the rest of the description is left untouched."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The Wrike task ID",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Visible text of the checklist item",
+                    },
+                    "checked": {
+                        "type": "boolean",
+                        "description": "true to check, false to uncheck (default true)",
+                        "default": True,
+                    },
+                },
+                "required": ["task_id", "label"],
             },
         ),
         Tool(
@@ -1296,6 +1366,46 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 updated = current.replace(old_text, new_text)
                 task = await client.update_task(task_id=task_id, description=updated)
                 output = ["**Task description updated:**\n", _format_task(task)]
+                return [TextContent(type="text", text="\n".join(output))]
+
+            elif name == "set_description_checkbox":
+                task_id = arguments["task_id"]
+                label = " ".join(arguments["label"].split())
+                checked = arguments.get("checked", True)
+
+                current = (await client.get_task(task_id)).description or ""
+                boxes = _find_checkboxes(current)
+                if not boxes:
+                    raise ValueError("The task description has no checkboxes.")
+                matches = [b for b in boxes if b[1] == label]
+                if not matches:
+                    available = ", ".join(f"'{b[1]}'" for b in boxes)
+                    raise ValueError(
+                        f"No checkbox labelled '{label}'. Available: {available}"
+                    )
+                if len(matches) > 1:
+                    raise ValueError(
+                        f"{len(matches)} checkboxes are labelled '{label}';"
+                        " use edit_task_description to change the right one."
+                    )
+
+                match, _, is_checked = matches[0]
+                state = "checked" if checked else "unchecked"
+                if is_checked == checked:
+                    return [
+                        TextContent(
+                            type="text",
+                            text=f"Checkbox '{label}' is already {state}; nothing changed.",
+                        )
+                    ]
+
+                updated = (
+                    current[: match.start()]
+                    + _set_checked(match.group(0), checked)
+                    + current[match.end():]
+                )
+                task = await client.update_task(task_id=task_id, description=updated)
+                output = [f"**Checkbox '{label}' {state}:**\n", _format_task(task)]
                 return [TextContent(type="text", text="\n".join(output))]
 
             elif name == "delete_task":

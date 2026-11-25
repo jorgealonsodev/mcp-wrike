@@ -15,6 +15,8 @@ MCP (Model Context Protocol) server for Wrike project management. Full CRUD supp
 - **get_task_full** — Complete view: task + comments + attachments
 
 Task and project descriptions are returned as raw HTML, so agents can edit wording without losing bold, lists, links, or other formatting.
+
+Checklist items in descriptions must be written as `<input type="checkbox" />` (add `checked="checked"` for a done item). Wrike renders them as native checkboxes; the editor's internal `data-checked` markup is stripped by the API.
 - **get_workflows** — List all account-level workflows and their custom statuses
 - **get_custom_fields** — List all custom field definitions
 - **get_custom_item_types** — List all custom item type definitions
@@ -25,6 +27,7 @@ Task and project descriptions are returned as raw HTML, so agents can edit wordi
 - **create_task** — Create tasks with title, description, status, assignees, dates, importance, custom fields, and custom item types
 - **update_task** — Update any task field including custom fields
 - **edit_task_description** — Replace a fragment of a task description in place (exact match on the stored HTML), keeping all formatting intact
+- **set_description_checkbox** — Check or uncheck a checklist item in a task description by its visible text
 - **complete_task** — Mark a task as completed
 - **move_task** — Move a task between folders (add/remove parents)
 - **delete_task** — Delete a task permanently
