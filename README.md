@@ -13,6 +13,8 @@ MCP (Model Context Protocol) server for Wrike project management. Full CRUD supp
 - **get_task_comments** — View comments/notes on a task
 - **get_task_attachments** — List task attachments
 - **get_task_full** — Complete view: task + comments + attachments
+
+Task and project descriptions are returned as raw HTML, so agents can edit wording without losing bold, lists, links, or other formatting.
 - **get_workflows** — List all account-level workflows and their custom statuses
 - **get_custom_fields** — List all custom field definitions
 - **get_custom_item_types** — List all custom item type definitions
@@ -22,6 +24,7 @@ MCP (Model Context Protocol) server for Wrike project management. Full CRUD supp
 ### Write
 - **create_task** — Create tasks with title, description, status, assignees, dates, importance, custom fields, and custom item types
 - **update_task** — Update any task field including custom fields
+- **edit_task_description** — Replace a fragment of a task description in place (exact match on the stored HTML), keeping all formatting intact
 - **complete_task** — Mark a task as completed
 - **move_task** — Move a task between folders (add/remove parents)
 - **delete_task** — Delete a task permanently

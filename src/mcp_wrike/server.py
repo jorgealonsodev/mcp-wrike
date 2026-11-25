@@ -86,12 +86,9 @@ def _format_task(task, include_description: bool = True) -> str:
     if task.permalink:
         lines.append(f"- Link: {task.permalink}")
 
-    if include_description and task.description:
-        # Strip HTML tags for cleaner output
-        clean_desc = re.sub(r"<[^>]+>", "", task.description)
-        clean_desc = clean_desc.replace("&nbsp;", " ").strip()
-        if clean_desc:
-            lines.append(f"\n**Description:**\n{clean_desc}")
+    if include_description and task.description and task.description.strip():
+        # Raw HTML so agents can edit text in place without losing formatting
+        lines.append(f"\n**Description (HTML):**\n{task.description}")
 
     return "\n".join(lines)
 
@@ -136,11 +133,9 @@ def _format_project(project) -> str:
     if project.permalink:
         lines.append(f"- Link: {project.permalink}")
 
-    if project.description:
-        clean_desc = re.sub(r"<[^>]+>", "", project.description)
-        clean_desc = clean_desc.replace("&nbsp;", " ").strip()
-        if clean_desc:
-            lines.append(f"\n**Description:**\n{clean_desc}")
+    if project.description and project.description.strip():
+        # Raw HTML so agents can edit text in place without losing formatting
+        lines.append(f"\n**Description (HTML):**\n{project.description}")
 
     return "\n".join(lines)
 
@@ -483,6 +478,39 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["task_id"],
+            },
+        ),
+        Tool(
+            name="edit_task_description",
+            description=(
+                "Edit part of a task description without touching its"
+                " formatting. Replaces old_text with new_text inside the"
+                " stored HTML (read it first with get_task, which returns"
+                " the description as raw HTML). old_text must match the"
+                " HTML exactly and occur once unless replace_all=true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The Wrike task ID",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact text or HTML fragment to replace",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Replacement text or HTML fragment",
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace every occurrence (default false)",
+                        "default": False,
+                    },
+                },
+                "required": ["task_id", "old_text", "new_text"],
             },
         ),
         Tool(
@@ -1244,6 +1272,30 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 )
 
                 output = ["**Task updated successfully:**\n", _format_task(task)]
+                return [TextContent(type="text", text="\n".join(output))]
+
+            elif name == "edit_task_description":
+                task_id = arguments["task_id"]
+                old_text = arguments["old_text"]
+                new_text = arguments["new_text"]
+                replace_all = arguments.get("replace_all", False)
+
+                current = (await client.get_task(task_id)).description or ""
+                count = current.count(old_text) if old_text else 0
+                if count == 0:
+                    raise ValueError(
+                        "old_text not found in the description HTML."
+                        " Read the task first and copy the HTML exactly."
+                    )
+                if count > 1 and not replace_all:
+                    raise ValueError(
+                        f"old_text appears {count} times in the description."
+                        " Add surrounding context or set replace_all=true."
+                    )
+
+                updated = current.replace(old_text, new_text)
+                task = await client.update_task(task_id=task_id, description=updated)
+                output = ["**Task description updated:**\n", _format_task(task)]
                 return [TextContent(type="text", text="\n".join(output))]
 
             elif name == "delete_task":
