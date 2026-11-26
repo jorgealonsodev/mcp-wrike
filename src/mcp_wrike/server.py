@@ -50,6 +50,50 @@ def _set_checked(tag: str, checked: bool) -> str:
     return tag[:-1].rstrip() + ' checked="checked">'
 
 
+# Tool arguments that carry Wrike IDs, by argument name, and the kind used to
+# convert permalinks and numeric IDs. Names are shared across tools on purpose.
+ID_ARGS: dict[str, str] = {
+    "task_id": "task",
+    "add_super_tasks": "task",
+    "remove_super_tasks": "task",
+    "folder_id": "folder",
+    "parent_folder_id": "folder",
+    "project_id": "folder",
+    "space_id": "folder",
+    "add_parents": "folder",
+    "remove_parents": "folder",
+    "responsible_ids": "user",
+    "add_responsibles": "user",
+    "remove_responsibles": "user",
+    "owner_ids": "user",
+}
+ID_HINT = (
+    " Accepts the API ID, the numeric ID from the item's link,"
+    " or the full link (https://www.wrike.com/open.htm?id=...)."
+)
+
+
+async def _resolve_id_args(client: WrikeClient, arguments: dict) -> dict:
+    """Return a copy of the arguments with every ID argument converted to an API ID."""
+    resolved = dict(arguments)
+    for arg, kind in ID_ARGS.items():
+        value = resolved.get(arg)
+        if isinstance(value, str) and value:
+            resolved[arg] = await client.resolve_id(value, kind)
+        elif isinstance(value, list):
+            resolved[arg] = await client.resolve_ids(value, kind)
+    return resolved
+
+
+def _add_id_hints(tools: list[Tool]) -> list[Tool]:
+    """Append ID_HINT to the description of every ID argument."""
+    for tool in tools:
+        for arg, prop in tool.inputSchema.get("properties", {}).items():
+            if arg in ID_ARGS and ID_HINT not in prop.get("description", ""):
+                prop["description"] = prop.get("description", "") + ID_HINT
+    return tools
+
+
 # Initialize MCP server
 server = Server("mcp-wrike")
 
@@ -206,6 +250,11 @@ def _format_attachment(attachment) -> str:
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools."""
+    return _add_id_hints(_tool_definitions())
+
+
+def _tool_definitions() -> list[Tool]:
+    """Tool definitions, before ID hints are added."""
     return [
         Tool(
             name="search_tasks",
@@ -1124,6 +1173,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     try:
         async with WrikeClient(token) as client:
+            arguments = await _resolve_id_args(client, arguments)
+
             if name == "search_tasks":
                 title = arguments.get("title")
                 status = arguments.get("status")
