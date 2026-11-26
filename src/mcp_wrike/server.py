@@ -3,7 +3,9 @@
 import asyncio
 import html
 import re
+import unicodedata
 
+import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
@@ -1151,7 +1153,190 @@ def _tool_definitions() -> list[Tool]:
                 "required": ["task_id"],
             },
         ),
+        Tool(
+            name="get_me",
+            description="Get the authenticated Wrike user: ID, name, email and role",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="search_users",
+            description=(
+                "Find Wrike users and groups by part of their first name, last"
+                " name or email (case- and accent-insensitive). Returns IDs to"
+                " use as assignees, owners or approvers."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Text to match, e.g. 'laura' or '@acme.com'",
+                    },
+                    "include_deleted": {
+                        "type": "boolean",
+                        "description": "Include deleted users (default: false)",
+                        "default": False,
+                    },
+                    "refresh": {
+                        "type": "boolean",
+                        "description": "Reload the contact list instead of using the cache",
+                        "default": False,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 20)",
+                        "default": 20,
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="list_spaces",
+            description="List the Wrike spaces you can access, with ID, title and access type",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="get_item_children",
+            description=(
+                "List the direct children of a space, folder, project or task:"
+                " child folders and projects, then tasks (or subtasks of a task),"
+                " each with ID, type, status and link. Use it to walk the"
+                " hierarchy one level at a time."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "item_id": {
+                        "type": "string",
+                        "description": "Space, folder, project or task." + ID_HINT,
+                    },
+                    "include_tasks": {
+                        "type": "boolean",
+                        "description": "Include tasks directly in a folder (default: true)",
+                        "default": True,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum children to return (default: 50)",
+                        "default": 50,
+                    },
+                },
+                "required": ["item_id"],
+            },
+        ),
     ]
+
+
+def _contact_name(contact: dict) -> str:
+    name = f"{contact.get('firstName', '')} {contact.get('lastName', '')}".strip()
+    return name or _contact_email(contact) or contact.get("id", "")
+
+
+def _contact_email(contact: dict) -> str:
+    profiles = contact.get("profiles") or [{}]
+    return profiles[0].get("email", "") or ""
+
+
+def _fold(text: str) -> str:
+    """Lower-case text without accents, for forgiving matches."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+def _format_contact(contact: dict) -> str:
+    kind = "Group" if contact.get("type") == "Group" else "Person"
+    parts = [f"- **{_contact_name(contact)}** ({kind})", f"  - ID: `{contact.get('id')}`"]
+    email = _contact_email(contact)
+    if email:
+        parts.append(f"  - Email: {email}")
+    if contact.get("deleted"):
+        parts.append("  - Deleted: yes")
+    return "\n".join(parts)
+
+
+def _folder_type(folder: dict) -> str:
+    if folder.get("scope") == "WsRoot" or folder.get("space"):
+        return "Space"
+    return "Project" if folder.get("project") else "Folder"
+
+
+def _is_recycled(folder: dict) -> bool:
+    return folder.get("scope", "") in ("RbFolder", "RbRoot")
+
+
+def _child_line(title: str, item_id: str, kind: str, status: str = "", link: str = "") -> str:
+    status_part = f" | {status}" if status else ""
+    link_part = f" | {link}" if link else ""
+    return f"- **{title}** ({kind}{status_part}) — `{item_id}`{link_part}"
+
+
+def _task_child(task) -> str:
+    status = task.custom_status_name or task.status
+    return _child_line(task.title, task.id, "Task", status, task.permalink or "")
+
+
+async def _item_children(client: WrikeClient, arguments: dict) -> str:
+    """Direct children of a space, folder, project or task, as markdown."""
+    raw = arguments["item_id"]
+    limit = arguments.get("limit", 50)
+    include_tasks = arguments.get("include_tasks", True)
+
+    folder = None
+    try:
+        folder = await client.get_folder(await client.resolve_id(raw, "folder"))
+    except (httpx.HTTPStatusError, ValueError):
+        pass
+
+    if folder is None:
+        try:
+            task_id = await client.resolve_id(raw, "task")
+            task, sub_ids = await client.get_subtask_ids(task_id)
+        except (httpx.HTTPStatusError, ValueError) as exc:
+            raise ValueError(
+                f"'{raw}' is not a space, folder, project or task you can access"
+            ) from exc
+        subtasks = await client.get_tasks_by_ids(sub_ids[:limit]) if sub_ids else []
+        lines = [f"**{task.title}** (Task) — `{task.id}`", ""]
+        if not subtasks:
+            return "\n".join(lines + ["No subtasks."])
+        lines.append(f"Subtasks ({len(subtasks)} of {len(sub_ids)}):")
+        lines.extend(_task_child(t) for t in subtasks)
+        return "\n".join(lines)
+
+    folder_id = folder["id"]
+    child_ids = folder.get("childIds", [])
+    children = await client.get_folders_by_ids(child_ids) if child_ids else []
+    children = [c for c in children if not _is_recycled(c)][:limit]
+    tasks = (
+        await client.get_direct_folder_tasks(folder_id, limit - len(children))
+        if include_tasks and len(children) < limit
+        else []
+    )
+
+    lines = [
+        f"**{folder.get('title', 'Untitled')}** ({_folder_type(folder)}) — `{folder_id}`",
+        "",
+    ]
+    if not children and not tasks:
+        return "\n".join(lines + ["No children."])
+    if children:
+        lines.append(f"Folders and projects ({len(children)}):")
+        lines.extend(
+            _child_line(
+                c.get("title", "Untitled"), c["id"], _folder_type(c),
+                link=c.get("permalink", ""),
+            )
+            for c in children
+        )
+    if tasks:
+        if children:
+            lines.append("")
+        lines.append(f"Tasks ({len(tasks)}):")
+        lines.extend(_task_child(t) for t in tasks)
+    if len(children) + len(tasks) >= limit:
+        lines.append(f"\nShowing the first {limit} items; raise limit to see more.")
+    return "\n".join(lines)
 
 
 @server.call_tool()
@@ -2112,6 +2297,54 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     _format_task(task, include_description=False),
                 ]
                 return [TextContent(type="text", text="\n".join(output))]
+
+            elif name == "get_me":
+                me = await client.get_me()
+                profile = (me.get("profiles") or [{}])[0]
+                lines = [
+                    f"**{_contact_name(me)}**",
+                    f"- ID: `{me.get('id')}`",
+                    f"- Email: {_contact_email(me) or me.get('primaryEmail', '')}",
+                    f"- Role: {profile.get('role', 'Unknown')}"
+                    + (" (admin)" if profile.get("admin") else ""),
+                ]
+                return [TextContent(type="text", text="\n".join(lines))]
+
+            elif name == "search_users":
+                needle = _fold(arguments["query"].strip())
+                include_deleted = arguments.get("include_deleted", False)
+                limit = arguments.get("limit", 20)
+                contacts = await client.list_contacts(refresh=arguments.get("refresh", False))
+                matches = [
+                    c for c in contacts
+                    if (include_deleted or not c.get("deleted"))
+                    and needle in _fold(" ".join(
+                        [_contact_name(c), _contact_email(c), c.get("primaryEmail", "")]
+                    ))
+                ]
+                if not matches:
+                    text = f"No users match '{arguments['query']}'."
+                    return [TextContent(type="text", text=text)]
+                output = [f"Found {len(matches)} users:\n"]
+                output.extend(_format_contact(c) for c in matches[:limit])
+                if len(matches) > limit:
+                    output.append(f"... and {len(matches) - limit} more")
+                return [TextContent(type="text", text="\n".join(output))]
+
+            elif name == "list_spaces":
+                spaces = await client.get_spaces()
+                if not spaces:
+                    return [TextContent(type="text", text="No spaces found.")]
+                output = [f"Found {len(spaces)} spaces:\n"]
+                for s in spaces:
+                    output.append(
+                        f"- **{s.get('title', 'Untitled')}** — ID: `{s.get('id')}`"
+                        f" | access: {s.get('accessType', 'Unknown')}"
+                    )
+                return [TextContent(type="text", text="\n".join(output))]
+
+            elif name == "get_item_children":
+                return [TextContent(type="text", text=await _item_children(client, arguments))]
 
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
