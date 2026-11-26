@@ -1292,17 +1292,88 @@ class WrikeClient:
             f"/request_forms/{form_id}/submit",
             params={"formFields": json.dumps(resolved)},
         )
-        job = (data.get("data") or [{}])[0]
+        return await self.wait_for_job((data.get("data") or [{}])[0], poll_seconds)
+
+    async def wait_for_job(
+        self, job: dict[str, Any], timeout: float, interval: float = 2.0
+    ) -> dict[str, Any]:
+        """Poll GET /async_job/{id} until the job leaves InQueue/InProgress or times out.
+
+        Returns:
+            The last job object seen
+        """
         job_id = job.get("id")
         waited = 0.0
         while job_id and job.get("status") in ("InQueue", "InProgress"):
-            if waited >= poll_seconds:
+            if waited >= timeout:
                 break
-            await asyncio.sleep(2)
-            waited += 2
+            await asyncio.sleep(interval)
+            waited += interval
             data = await self._request("GET", f"/async_job/{job_id}")
             job = (data.get("data") or [{}])[0]
         return job
+
+    async def list_blueprints(self, kind: str, space_id: str | None = None) -> list[dict]:
+        """List folder or task blueprints, account-wide or in one space.
+
+        Args:
+            kind: "folder" or "task"
+            space_id: Only blueprints of this space
+        """
+        resource = f"{kind}_blueprints"
+        endpoint = f"/spaces/{space_id}/{resource}" if space_id else f"/{resource}"
+        data = await self._request("GET", endpoint)
+        return data.get("data", [])
+
+    async def launch_blueprint(
+        self,
+        kind: str,
+        blueprint_id: str,
+        title: str,
+        parent_id: str | None = None,
+        super_task_id: str | None = None,
+        title_prefix: str | None = None,
+        reschedule_date: str | None = None,
+        reschedule_mode: str | None = None,
+        timeout: float = 60.0,
+    ) -> dict[str, Any]:
+        """Launch a folder or task blueprint and wait for the async job.
+
+        Folder blueprints need parent_id. Task blueprints need exactly one of
+        parent_id (a folder) or super_task_id (to create subtasks).
+
+        Returns:
+            The last async job object seen (status, result, errorMessage)
+        """
+        if kind not in ("folder", "task"):
+            raise ValueError("blueprint_type must be 'folder' or 'task'")
+        if kind == "folder" and (not parent_id or super_task_id):
+            raise ValueError("A folder blueprint needs parent_id (and no super_task_id)")
+        if kind == "task" and bool(parent_id) == bool(super_task_id):
+            raise ValueError("A task blueprint needs exactly one of parent_id or super_task_id")
+        if reschedule_mode and reschedule_mode not in ("Start", "End"):
+            raise ValueError("reschedule_mode must be Start or End")
+        if reschedule_mode and not reschedule_date:
+            raise ValueError("reschedule_mode needs reschedule_date")
+
+        params: dict[str, str] = {"title": title}
+        if kind == "folder":
+            params["parent"] = parent_id or ""
+        elif parent_id:
+            params["parentId"] = parent_id
+        else:
+            params["superTaskId"] = super_task_id or ""
+        if title_prefix:
+            params["titlePrefix"] = title_prefix
+        if reschedule_date:
+            params["rescheduleDate"] = _check_date("reschedule_date", reschedule_date)
+        if reschedule_mode:
+            params["rescheduleMode"] = reschedule_mode
+
+        data = await self._request(
+            "POST", f"/{kind}_blueprints/{blueprint_id}/launch_async", params=params
+        )
+        return await self.wait_for_job((data.get("data") or [{}])[0], timeout)
 
     async def create_timelog(
         self,
