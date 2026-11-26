@@ -104,7 +104,10 @@ def _add_id_hints(tools: list[Tool]) -> list[Tool]:
     for tool in tools:
         for arg, prop in tool.inputSchema.get("properties", {}).items():
             if arg in ID_ARGS and ID_HINT not in prop.get("description", ""):
-                prop["description"] = prop.get("description", "") + ID_HINT
+                base = prop.get("description", "").rstrip()
+                if base and not base.endswith("."):
+                    base += "."
+                prop["description"] = base + ID_HINT
     return tools
 
 
@@ -2627,6 +2630,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 for a in approvals[:limit]:
                     output.append(await _format_approval(client, a))
                     output.append("")
+                if len(approvals) > limit:
+                    output.append(f"... and {len(approvals) - limit} more; raise limit to see them.")
                 return [TextContent(type="text", text="\n".join(output))]
 
             elif name == "create_approval":
