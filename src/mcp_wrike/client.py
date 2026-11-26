@@ -1472,7 +1472,8 @@ class WrikeClient:
 
     def _parse_timelog(self, t: dict) -> WrikeTimelog:
         """Parse timelog from API response."""
-        # Wrike returns comments HTML-escaped (`+` comes back as `&#43;`)
+        # The REST API returns `+` literally (checked 2026-11-26, with and without
+        # plainText); unescape anyway in case a comment was stored escaped.
         comment = t.get("comment")
         return WrikeTimelog(
             id=t["id"],
