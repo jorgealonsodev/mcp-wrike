@@ -11,7 +11,11 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from .auth import get_access_token
-from .client import WrikeClient
+from .client import CUSTOM_FIELD_COMPARATORS, WrikeClient
+
+ADVANCED_DATE_ARGS = (
+    "due_start", "due_end", "completed_start", "completed_end", "start_start", "start_end",
+)
 
 # Wrike renders <input type="checkbox" /> in descriptions as a native checklist
 # item; the editor's own data-checked markup is stripped by the API.
@@ -68,6 +72,8 @@ ID_ARGS: dict[str, str] = {
     "add_responsibles": "user",
     "remove_responsibles": "user",
     "owner_ids": "user",
+    "assignees": "user",
+    "authors": "user",
 }
 ID_HINT = (
     " Accepts the API ID, the numeric ID from the item's link,"
@@ -261,8 +267,11 @@ def _tool_definitions() -> list[Tool]:
         Tool(
             name="search_tasks",
             description=(
-                "Search for Wrike tasks by title, status, folder,"
-                " or date range. Supports pagination."
+                "Search for Wrike tasks by title, status, folder, assignee,"
+                " author, dates, custom status, custom fields or importance."
+                " All filters combine with AND. Supports pagination."
+                " Overdue tasks: status='Active' plus due_end=<today>;"
+                " add assignees=['me'] for your own."
             ),
             inputSchema={
                 "type": "object",
@@ -299,10 +308,87 @@ def _tool_definitions() -> list[Tool]:
                         "type": "string",
                         "description": "Tasks updated on or before (YYYY-MM-DD)",
                     },
+                    "assignees": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Tasks assigned to any of these users;"
+                            " use 'me' for yourself."
+                        ),
+                    },
+                    "authors": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tasks created by any of these users; 'me' allowed.",
+                    },
+                    "due_start": {
+                        "type": "string",
+                        "description": "Tasks due on or after (YYYY-MM-DD)",
+                    },
+                    "due_end": {
+                        "type": "string",
+                        "description": "Tasks due on or before (YYYY-MM-DD)",
+                    },
+                    "completed_start": {
+                        "type": "string",
+                        "description": "Tasks completed on or after (YYYY-MM-DD)",
+                    },
+                    "completed_end": {
+                        "type": "string",
+                        "description": "Tasks completed on or before (YYYY-MM-DD)",
+                    },
+                    "start_start": {
+                        "type": "string",
+                        "description": "Tasks starting on or after (YYYY-MM-DD)",
+                    },
+                    "start_end": {
+                        "type": "string",
+                        "description": "Tasks starting on or before (YYYY-MM-DD)",
+                    },
+                    "custom_statuses": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Custom status IDs (any of them); see get_workflows"
+                        ),
+                    },
+                    "custom_fields": {
+                        "type": "array",
+                        "description": (
+                            "Custom field conditions; see get_custom_fields for IDs."
+                            " comparator defaults to EqualTo. IsEmpty/IsNotEmpty"
+                            " take no value; InRange/NotInRange take min_value and"
+                            " max_value; ContainsAll/ContainsAny take a list value."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "comparator": {
+                                    "type": "string",
+                                    "enum": list(CUSTOM_FIELD_COMPARATORS),
+                                },
+                                "value": {
+                                    "anyOf": [
+                                        {"type": "string"},
+                                        {"type": "array", "items": {"type": "string"}},
+                                    ]
+                                },
+                                "min_value": {"type": "string"},
+                                "max_value": {"type": "string"},
+                            },
+                            "required": ["id"],
+                        },
+                    },
+                    "importance": {
+                        "type": "string",
+                        "enum": ["High", "Normal", "Low"],
+                        "description": "Task importance",
+                    },
                     "sort_field": {
                         "type": "string",
-                        "description": "Sort by field (CreatedDate, UpdatedDate)",
-                        "enum": ["CreatedDate", "UpdatedDate"],
+                        "description": "Sort by field",
+                        "enum": ["CreatedDate", "UpdatedDate", "DueDate", "CompletedDate"],
                     },
                     "sort_order": {
                         "type": "string",
@@ -1376,6 +1462,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     updated_end=arguments.get("updated_end"),
                     sort_field=arguments.get("sort_field"),
                     sort_order=arguments.get("sort_order"),
+                    responsibles=arguments.get("assignees"),
+                    authors=arguments.get("authors"),
+                    custom_statuses=arguments.get("custom_statuses"),
+                    custom_fields=arguments.get("custom_fields"),
+                    importance=arguments.get("importance"),
+                    **{k: arguments.get(k) for k in ADVANCED_DATE_ARGS},
                 )
 
                 if not tasks:
@@ -1384,6 +1476,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         search_desc.append(f"title='{title}'")
                     if status:
                         search_desc.append(f"status='{status}'")
+                    for key in ("assignees", "authors", *ADVANCED_DATE_ARGS,
+                                "custom_statuses", "custom_fields", "importance"):
+                        if arguments.get(key):
+                            search_desc.append(f"{key}={arguments[key]!r}")
                     search_str = ", ".join(search_desc) if search_desc else "no filters"
                     return [
                         TextContent(type="text", text=f"No tasks found ({search_str}).")

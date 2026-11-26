@@ -18,6 +18,101 @@ _ID_TYPES = {"task": "ApiV2Task", "folder": "ApiV2Folder", "user": "ApiV2User"}
 _NUMERIC_ID_RE = re.compile(r"^(?:w:itm:)?(\d+)$|(?:^|[?&#/])id=(\d+)")
 
 
+CUSTOM_FIELD_COMPARATORS = (
+    "EqualTo", "IsEmpty", "IsNotEmpty", "LessThan", "LessOrEqualTo", "GreaterThan",
+    "GreaterOrEqualTo", "InRange", "NotInRange", "Contains", "StartsWith", "EndsWith",
+    "ContainsAll", "ContainsAny",
+)
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _check_date(field_name: str, value: str) -> str:
+    """Return value if it is a real YYYY-MM-DD date, else raise naming the field."""
+    try:
+        if not _DATE_RE.match(value):
+            raise ValueError
+        datetime.strptime(value, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        raise ValueError(f"{field_name} must be a date in YYYY-MM-DD format, got {value!r}")
+    return value
+
+
+def _date_range(
+    name: str, start: str | None, end: str | None, instant: bool = False
+) -> dict[str, str] | None:
+    """Build a Wrike date range filter; `instant` ranges need full timestamps."""
+    if not start and not end:
+        return None
+    out: dict[str, str] = {}
+    if start:
+        _check_date(f"{name}_start", start)
+        out["start"] = f"{start}T00:00:00Z" if instant else start
+    if end:
+        _check_date(f"{name}_end", end)
+        out["end"] = f"{end}T23:59:59Z" if instant else end
+    return out
+
+
+def _custom_field_filter(i: int, cf: dict) -> dict:
+    """Convert one {id, comparator, value, min_value, max_value} to the API shape."""
+    where = f"custom_fields[{i}]"
+    if not cf.get("id"):
+        raise ValueError(f"{where}.id is required")
+    comparator = cf.get("comparator") or "EqualTo"
+    if comparator not in CUSTOM_FIELD_COMPARATORS:
+        raise ValueError(
+            f"{where}.comparator {comparator!r} is not one of: "
+            + ", ".join(CUSTOM_FIELD_COMPARATORS)
+        )
+    out: dict[str, Any] = {"id": cf["id"], "comparator": comparator}
+    value = cf.get("value")
+    if comparator in ("IsEmpty", "IsNotEmpty"):
+        return out
+    if comparator in ("InRange", "NotInRange"):
+        if cf.get("min_value") is None or cf.get("max_value") is None:
+            raise ValueError(f"{where} with {comparator} needs min_value and max_value")
+        out["minValue"], out["maxValue"] = str(cf["min_value"]), str(cf["max_value"])
+        return out
+    if value is None or value == "" or value == []:
+        raise ValueError(f"{where}.value is required for {comparator}")
+    if comparator in ("ContainsAll", "ContainsAny"):
+        out["values"] = [str(v) for v in value] if isinstance(value, list) else [str(value)]
+    else:
+        out["value"] = str(value)
+    return out
+
+
+def _advanced_task_filters(**f: Any) -> dict[str, str]:
+    """Validate the advanced task filters and return them as GET /tasks params."""
+    params: dict[str, Any] = {}
+    if f["importance"] and f["importance"] not in ("High", "Normal", "Low"):
+        raise ValueError(f"importance must be High, Normal or Low, got {f['importance']!r}")
+    ranges = [
+        ("dueDate", _date_range("due", f["due_start"], f["due_end"])),
+        ("startDate", _date_range("start", f["start_start"], f["start_end"])),
+        ("completedDate", _date_range(
+            "completed", f["completed_start"], f["completed_end"], instant=True
+        )),
+    ]
+    custom_fields = [
+        _custom_field_filter(i, cf) for i, cf in enumerate(f["custom_fields"] or [])
+    ]
+    if f["responsibles"]:
+        params["responsibles"] = json.dumps(f["responsibles"])
+    if f["authors"]:
+        params["authors"] = json.dumps(f["authors"])
+    for key, value in ranges:
+        if value:
+            params[key] = json.dumps(value)
+    if f["custom_statuses"]:
+        params["customStatuses"] = json.dumps(f["custom_statuses"])
+    if custom_fields:
+        params["customFields"] = json.dumps(custom_fields)
+    if f["importance"]:
+        params["importance"] = f["importance"]
+    return params
+
+
 @dataclass
 class WrikeTask:
     """Wrike task data."""
@@ -228,8 +323,19 @@ class WrikeClient:
         updated_end: str | None = None,
         sort_field: str | None = None,
         sort_order: str | None = None,
+        responsibles: list[str] | None = None,
+        authors: list[str] | None = None,
+        due_start: str | None = None,
+        due_end: str | None = None,
+        completed_start: str | None = None,
+        completed_end: str | None = None,
+        start_start: str | None = None,
+        start_end: str | None = None,
+        custom_statuses: list[str] | None = None,
+        custom_fields: list[dict] | None = None,
+        importance: str | None = None,
     ) -> list[WrikeTask]:
-        """Search for tasks.
+        """Search for tasks. All filters combine with AND.
 
         Args:
             title: Search by title (partial match)
@@ -240,13 +346,34 @@ class WrikeClient:
             created_end: Filter tasks created on or before (YYYY-MM-DD)
             updated_start: Filter tasks updated on or after (YYYY-MM-DD)
             updated_end: Filter tasks updated on or before (YYYY-MM-DD)
-            sort_field: Sort by field (CreatedDate, UpdatedDate, etc.)
+            sort_field: Sort by field (CreatedDate, UpdatedDate, DueDate, ...)
             sort_order: Sort direction (Asc, Desc)
+            responsibles: Assignee contact IDs (any of them)
+            authors: Author contact IDs (any of them)
+            due_start, due_end: Due date range (YYYY-MM-DD, inclusive)
+            completed_start, completed_end: Completion date range (YYYY-MM-DD)
+            start_start, start_end: Start date range (YYYY-MM-DD)
+            custom_statuses: Custom status IDs (any of them)
+            custom_fields: [{id, comparator, value, min_value, max_value}]
+            importance: High, Normal or Low
 
         Returns:
             List of matching tasks
+
+        Raises:
+            ValueError: On an invalid date, comparator or importance, before
+                any API call
         """
         import json as json_mod
+
+        extra = _advanced_task_filters(
+            responsibles=responsibles, authors=authors,
+            due_start=due_start, due_end=due_end,
+            completed_start=completed_start, completed_end=completed_end,
+            start_start=start_start, start_end=start_end,
+            custom_statuses=custom_statuses, custom_fields=custom_fields,
+            importance=importance,
+        )
 
         page_size = min(limit, 1000)
         params: dict[str, Any] = {
@@ -276,6 +403,7 @@ class WrikeClient:
             params["sortField"] = sort_field
         if sort_order:
             params["sortOrder"] = sort_order
+        params.update(extra)
 
         if folder_id:
             endpoint = f"/folders/{folder_id}/tasks"
