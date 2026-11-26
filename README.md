@@ -51,7 +51,7 @@ Checklist items in descriptions must be written as `<input type="checkbox" />` (
 - **get_task_timelogs** — Time entries logged on a task
 - **get_timelog_report** — Hours by person and by task, optionally for one folder and a date range
 
-Timelog comments are returned exactly as typed: Wrike sends them HTML-escaped (`+` as `&#43;`), and the server unescapes them.
+Timelog comments are returned exactly as typed. The REST API stores and returns `+` literally; the server also unescapes HTML entities such as `&#43;` in case a client or integration wrote the comment escaped.
 
 ### Approvals
 - **get_approvals** — Approvals of a task (`task_id`), a folder or project (`folder_id`), or the whole account, with each approver's decision and comment. Filter with `statuses` (`Draft`, `NotRequired`, `Approved`, `Rejected`, `Cancelled`, `Pending`)
