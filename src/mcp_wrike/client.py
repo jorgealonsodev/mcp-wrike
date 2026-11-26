@@ -635,9 +635,9 @@ class WrikeClient:
 
     async def get_subtask_ids(self, task_id: str) -> tuple[WrikeTask, list[str]]:
         """Get a task and the IDs of its direct subtasks."""
-        data = await self._request(
-            "GET", f"/tasks/{task_id}", params={"fields": '["subTaskIds"]'}
-        )
+        # subTaskIds is a default field of a single task; asking for it in
+        # `fields` makes Wrike answer 400 "not allowed".
+        data = await self._request("GET", f"/tasks/{task_id}")
         tasks = data.get("data", [])
         if not tasks:
             raise ValueError(f"Task not found: {task_id}")

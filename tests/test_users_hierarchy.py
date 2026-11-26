@@ -132,9 +132,15 @@ async def test_item_children_respects_limit(api):
     assert "Showing the first 2 items" in text
 
 
+def _single_task(request):
+    # Like Wrike: subTaskIds is a default field and may not be requested.
+    if "fields" in request.url.params:
+        return httpx.Response(400, json={"errorDescription": "Fields parameter not allowed"})
+    return [{"id": "MTASK", "title": "Parent", "status": "Active", "subTaskIds": ["S1", "S2"]}]
+
+
 async def test_item_children_of_a_task_lists_subtasks(api):
-    api.on("GET", "/tasks/MTASK", [{"id": "MTASK", "title": "Parent", "status": "Active",
-                                    "subTaskIds": ["S1", "S2"]}])
+    api.on("GET", "/tasks/MTASK", _single_task)
     api.on("GET", "/tasks/S1,S2", [
         {"id": "S1", "title": "One", "status": "Completed"},
         {"id": "S2", "title": "Two", "status": "Active", "permalink": "https://w/2"},
