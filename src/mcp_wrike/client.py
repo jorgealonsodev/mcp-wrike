@@ -1,14 +1,21 @@
 """Wrike API client."""
 
 import asyncio
+import html
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 BASE_URL = "https://www.wrike.com/api/v4"
+
+IdKind = Literal["task", "folder", "user"]
+_ID_TYPES = {"task": "ApiV2Task", "folder": "ApiV2Folder", "user": "ApiV2User"}
+# Numeric permalink IDs: bare digits, `w:itm:N` (official MCP), or `id=N` in a link
+_NUMERIC_ID_RE = re.compile(r"^(?:w:itm:)?(\d+)$|(?:^|[?&#/])id=(\d+)")
 
 
 @dataclass
@@ -105,6 +112,42 @@ class WrikeClient:
         self.access_token = access_token
         self._client: httpx.AsyncClient | None = None
         self._status_cache: dict[str, str] = {}  # status_id -> name
+        self._id_cache: dict[tuple[str, str], str] = {}  # (kind, numeric) -> API ID
+
+    async def resolve_id(self, raw: str, kind: IdKind) -> str:
+        """Convert a permalink, numeric permalink ID or `w:itm:N` to an API ID.
+
+        API IDs are returned unchanged. Numeric IDs are converted with
+        GET /ids and cached for the lifetime of the client.
+
+        Raises:
+            ValueError: If Wrike cannot convert the ID for this kind
+        """
+        raw = raw.strip()
+        match = _NUMERIC_ID_RE.search(raw)
+        if not match:
+            return raw
+        numeric = match.group(1) or match.group(2)
+        key = (kind, numeric)
+        if key in self._id_cache:
+            return self._id_cache[key]
+
+        error = ValueError(f"Could not resolve Wrike ID '{numeric}' as {kind}")
+        try:
+            data = await self._request(
+                "GET", "/ids", params={"ids": f"[{numeric}]", "type": _ID_TYPES[kind]}
+            )
+        except (httpx.HTTPStatusError, ValueError) as exc:
+            raise error from exc
+        converted = data.get("data") or []
+        if not converted or not converted[0].get("id"):
+            raise error
+        self._id_cache[key] = converted[0]["id"]
+        return self._id_cache[key]
+
+    async def resolve_ids(self, raws: list[str], kind: IdKind) -> list[str]:
+        """Resolve each ID in a list with resolve_id."""
+        return [await self.resolve_id(r, kind) for r in raws]
 
     async def __aenter__(self):
         self._client = httpx.AsyncClient(
@@ -1159,13 +1202,15 @@ class WrikeClient:
 
     def _parse_timelog(self, t: dict) -> WrikeTimelog:
         """Parse timelog from API response."""
+        # Wrike returns comments HTML-escaped (`+` comes back as `&#43;`)
+        comment = t.get("comment")
         return WrikeTimelog(
             id=t["id"],
             task_id=t.get("taskId", ""),
             user_id=t.get("userId", ""),
             hours=t.get("hours", 0.0),
             tracked_date=t.get("trackedDate", ""),
-            comment=t.get("comment"),
+            comment=html.unescape(comment) if comment else comment,
             category_id=t.get("categoryId"),
             created_date=self._parse_datetime(t.get("createdDate")),
             updated_date=self._parse_datetime(t.get("updatedDate")),
