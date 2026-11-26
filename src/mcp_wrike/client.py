@@ -113,6 +113,8 @@ class WrikeClient:
         self._client: httpx.AsyncClient | None = None
         self._status_cache: dict[str, str] = {}  # status_id -> name
         self._id_cache: dict[tuple[str, str], str] = {}  # (kind, numeric) -> API ID
+        self._me: dict | None = None
+        self._contacts_cache: list[dict] | None = None
 
     async def resolve_id(self, raw: str, kind: IdKind) -> str:
         """Convert a permalink, numeric permalink ID or `w:itm:N` to an API ID.
@@ -124,6 +126,8 @@ class WrikeClient:
             ValueError: If Wrike cannot convert the ID for this kind
         """
         raw = raw.strip()
+        if kind == "user" and raw.lower() == "me":
+            return (await self.get_me())["id"]
         match = _NUMERIC_ID_RE.search(raw)
         if not match:
             return raw
@@ -468,16 +472,81 @@ class WrikeClient:
         return data.get("data", [])
 
     async def get_me(self) -> dict:
-        """Get the authenticated user's contact info.
+        """Get the authenticated user's contact info (cached per client).
 
         Returns:
             Contact dict for the current user
         """
-        data = await self._request("GET", "/contacts", params={"me": "true"})
-        contacts = data.get("data", [])
-        if not contacts:
-            raise ValueError("Could not identify authenticated user")
-        return contacts[0]
+        if self._me is None:
+            data = await self._request("GET", "/contacts", params={"me": "true"})
+            contacts = data.get("data", [])
+            if not contacts:
+                raise ValueError("Could not identify authenticated user")
+            self._me = contacts[0]
+        return self._me
+
+    async def list_contacts(self, refresh: bool = False) -> list[dict]:
+        """Get every contact in the account, cached per client.
+
+        Args:
+            refresh: Fetch again instead of using the cache
+        """
+        if self._contacts_cache is None or refresh:
+            data = await self._request("GET", "/contacts")
+            self._contacts_cache = data.get("data", [])
+        return self._contacts_cache
+
+    async def get_folders_by_ids(self, folder_ids: list[str]) -> list[dict]:
+        """Get folders by ID, in batches of 100 (the API limit)."""
+        folders: list[dict] = []
+        for i in range(0, len(folder_ids), 100):
+            batch = ",".join(folder_ids[i : i + 100])
+            data = await self._request("GET", f"/folders/{batch}")
+            folders.extend(data.get("data", []))
+        return folders
+
+    async def get_subtask_ids(self, task_id: str) -> tuple[WrikeTask, list[str]]:
+        """Get a task and the IDs of its direct subtasks."""
+        data = await self._request(
+            "GET", f"/tasks/{task_id}", params={"fields": '["subTaskIds"]'}
+        )
+        tasks = data.get("data", [])
+        if not tasks:
+            raise ValueError(f"Task not found: {task_id}")
+        await self._ensure_status_cache()
+        return self._parse_task(tasks[0]), tasks[0].get("subTaskIds", [])
+
+    async def get_direct_folder_tasks(self, folder_id: str, limit: int) -> list[WrikeTask]:
+        """Get top-level tasks placed directly in a folder (no descendants, no subtasks)."""
+        await self._ensure_status_cache()
+        data = await self._request(
+            "GET",
+            f"/folders/{folder_id}/tasks",
+            params={
+                "descendants": "false",
+                "pageSize": min(max(limit, 1) * 2, 1000),
+                "fields": '["parentIds","superTaskIds"]',
+            },
+        )
+        tasks = [self._parse_task(t) for t in data.get("data", [])]
+        ids = {t.id for t in tasks}
+        # descendants=false is not documented to exclude child folders, so
+        # keep only tasks filed here whose parent task is not also listed.
+        return [
+            t for t in tasks
+            if (not t.parent_ids or folder_id in t.parent_ids)
+            and not ids.intersection(t.super_task_ids)
+        ][:limit]
+
+    async def get_tasks_by_ids(self, task_ids: list[str]) -> list[WrikeTask]:
+        """Get tasks by ID, in batches of 100 (the API limit)."""
+        await self._ensure_status_cache()
+        tasks: list[WrikeTask] = []
+        for i in range(0, len(task_ids), 100):
+            batch = ",".join(task_ids[i : i + 100])
+            data = await self._request("GET", f"/tasks/{batch}")
+            tasks.extend(self._parse_task(t) for t in data.get("data", []))
+        return tasks
 
     async def get_spaces(self) -> list[dict]:
         """Get all spaces the user has access to.
