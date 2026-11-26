@@ -135,3 +135,12 @@ async def test_blank_folder_id_does_not_widen_search(api):
     api.on("GET", "/folders/   /tasks", [])
     await call("search_tasks", folder_id="   ")
     assert api.calls("GET", "/api/v4/tasks") == []
+
+
+def test_id_hint_follows_a_full_sentence():
+    tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    desc = tools["get_task"].inputSchema["properties"]["task_id"]["description"]
+    assert desc == "The Wrike task ID." + server.ID_HINT
+    for tool in tools.values():
+        for prop in tool.inputSchema.get("properties", {}).values():
+            assert "ID Accepts" not in prop.get("description", ""), tool.name

@@ -112,3 +112,18 @@ def test_write_tools_say_they_are_writes():
     tools = {t.name: t for t in asyncio.run(server.list_tools())}
     for name in ("create_approval", "update_approval"):
         assert "This is a write" in tools[name].description
+
+
+async def test_get_approvals_says_how_many_were_left_out(api):
+    _setup(api)
+    api.on("GET", "/approvals", [{**APPROVAL, "id": f"A{i}"} for i in range(5)])
+    text = await call("get_approvals", limit=2)
+    assert text.startswith("Found 5 approvals")
+    assert "`A1`" in text and "`A2`" not in text
+    assert text.endswith("... and 3 more; raise limit to see them.")
+
+
+async def test_get_approvals_within_limit_has_no_more_line(api):
+    _setup(api)
+    api.on("GET", "/approvals", [APPROVAL])
+    assert "more" not in await call("get_approvals", limit=2)
