@@ -21,13 +21,13 @@ The PRD `docs/PRD-official-mcp-parity.md` is the full specification; each S# bel
 
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
-| T1 | S1, S2 | inline | in progress | |
-| T2 | S3 | inline | pending | |
-| T3 | S4 | inline | pending | |
-| T4 | S5 | inline | pending | |
-| T5 | S6 | inline | pending | |
-| T6 | S7 | inline | pending | |
-| T7 | S8 | inline | pending | |
+| T1 | S1, S2 | inline | done (RED 19 → GREEN) | ed22a26 |
+| T2 | S3 | inline | done; live fix for subtasks | e61623e, 2973890 |
+| T3 | S4 | inline | done (RED 12 → GREEN; old-param regression pinned) | c7205ba |
+| T4 | S5 | inline | done; set_approval_decision dropped (no API) | 9ce46f1 |
+| T5 | S6 | inline | done; job polling shared with submit_request_form | b65301b |
+| T6 | S7 | n/a | dropped: no inbox endpoint; audit_log is Enterprise-admin only | 048169b (README) |
+| T7 | S8 | inline | done | 048169b |
 
 Route evidence: all slices edit `client.py` and `server.py`, so they cannot run as parallel writers; no writer trigger applies.
 
@@ -35,3 +35,6 @@ Route evidence: all slices edit `client.py` and `server.py`, so they cannot run 
 
 - **L1** (2026-11-26, user): "/mnt/480GB/Proyectos/Trabajo/Enfoquestic/20261126_mcp-wrike/20261126_mcp-wrike_git/mcp-wrike/docs/PRD-official-mcp-parity.md implementa esto"
 - L2: Baseline: 18 tests pass. A read-only research worker is checking the PRD §8 API questions against the Wrike v4 docs.
+- L3: API research (developers.wrike.com reference, 2026-04-28): no approve/reject input on any approvals endpoint; DELETE /approvals/{id} cancels; no inbox endpoint; /audit_log is for Enterprise admins only; async job result documented only as {folderId}; POST timelogs documented as query params.
+- L4: Read-only smoke test against the real account. Passed: get_me; get_task by link and by numeric ID (same task); timelog comment shows "+"; UC2 overdue search; UC4 lists the 5 folders and 3 direct tasks of R Andrade; list_spaces; get_approvals; bad date rejected. Found and fixed: `fields=["subTaskIds"]` returns 400 on GET /tasks/{id} (2973890). Data limits: the token sees only 1 contact, so UC3 "Laura" could not be checked live; the account has no blueprints. Not done: the one timelog write (no test task named); the Wrike UI check from F1.3.
+- L5: Risk: item 3 (T1 resolves ID arguments in call_tool before every existing tool). Native assess: medium / under_budget on every commit. One independent verifier runs at the feature's end.
