@@ -15,7 +15,7 @@ BASE_URL = "https://www.wrike.com/api/v4"
 IdKind = Literal["task", "folder", "user"]
 _ID_TYPES = {"task": "ApiV2Task", "folder": "ApiV2Folder", "user": "ApiV2User"}
 # Numeric permalink IDs: bare digits, `w:itm:N` (official MCP), or `id=N` in a link
-_NUMERIC_ID_RE = re.compile(r"^(?:w:itm:)?(\d+)$|(?:^|[?&#/])id=(\d+)")
+_NUMERIC_ID_RE = re.compile(r"^(?:w:itm:)?(\d+)$|(?:^|[?&#/])id=(\d+)", re.IGNORECASE)
 
 
 CUSTOM_FIELD_COMPARATORS = (
@@ -220,7 +220,9 @@ class WrikeClient:
         Raises:
             ValueError: If Wrike cannot convert the ID for this kind
         """
-        raw = raw.strip()
+        original, raw = raw, raw.strip()
+        if not raw:
+            return original  # never turn an explicit value into "no filter"
         if kind == "user" and raw.lower() == "me":
             return (await self.get_me())["id"]
         match = _NUMERIC_ID_RE.search(raw)

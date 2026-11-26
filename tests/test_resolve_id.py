@@ -30,6 +30,7 @@ def _ids(api, mapping):
         "4614504478",
         "https://www.wrike.com/open.htm?id=4614504478",
         "w:itm:4614504478",
+        "W:ITM:4614504478",
         " https://www.wrike.com/workspace.htm?acc=1#path=folder&id=4614504478 ",
     ],
 )
@@ -127,3 +128,10 @@ def test_every_id_argument_documents_links_and_numeric_ids():
                 assert "numeric ID" in prop["description"], (tool.name, arg)
                 assert "link" in prop["description"], (tool.name, arg)
     assert seen > 30
+
+
+async def test_blank_folder_id_does_not_widen_search(api):
+    api.on("GET", "/tasks", [{"id": "A", "title": "x", "status": "Active"}])
+    api.on("GET", "/folders/   /tasks", [])
+    await call("search_tasks", folder_id="   ")
+    assert api.calls("GET", "/api/v4/tasks") == []
