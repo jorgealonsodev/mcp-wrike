@@ -77,6 +77,8 @@ ID_ARGS: dict[str, str] = {
     "approvers": "user",
     "add_approvers": "user",
     "remove_approvers": "user",
+    "parent_id": "folder",
+    "super_task_id": "task",
 }
 APPROVAL_STATUSES = ["Draft", "NotRequired", "Approved", "Rejected", "Cancelled", "Pending"]
 ID_HINT = (
@@ -1402,7 +1404,110 @@ def _tool_definitions() -> list[Tool]:
                 "required": ["approval_id"],
             },
         ),
+        Tool(
+            name="list_blueprints",
+            description=(
+                "List Wrike folder and task blueprints (templates) with their"
+                " IDs, for use with launch_blueprint."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "blueprint_type": {
+                        "type": "string",
+                        "enum": ["folder", "task", "all"],
+                        "description": "Which blueprints to list (default: all)",
+                        "default": "all",
+                    },
+                    "space_id": {"type": "string", "description": "Only this space's blueprints."},
+                    "title_contains": {
+                        "type": "string",
+                        "description": "Only titles containing this (case-insensitive)",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="launch_blueprint",
+            description=(
+                "Create a folder, project or task from a blueprint. This is a"
+                " write: it creates real items in Wrike, so confirm the"
+                " blueprint, parent and title with the user first. Waits for"
+                " Wrike's async job (default 60 s) and returns the new item's"
+                " ID and link, or the job ID if it is still running."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "blueprint_id": {"type": "string", "description": "From list_blueprints"},
+                    "blueprint_type": {
+                        "type": "string",
+                        "enum": ["folder", "task"],
+                        "description": "folder for folder/project blueprints, task for task ones",
+                    },
+                    "title": {"type": "string", "description": "Title of the new item"},
+                    "parent_id": {
+                        "type": "string",
+                        "description": "Folder or project to create it in.",
+                    },
+                    "super_task_id": {
+                        "type": "string",
+                        "description": (
+                            "Task blueprints only: create as subtasks of this task"
+                            " instead of in parent_id."
+                        ),
+                    },
+                    "title_prefix": {
+                        "type": "string",
+                        "description": "Prefix added to every copied item's title",
+                    },
+                    "reschedule_date": {
+                        "type": "string",
+                        "description": "Shift the copied dates to this date (YYYY-MM-DD)",
+                    },
+                    "reschedule_mode": {
+                        "type": "string",
+                        "enum": ["Start", "End"],
+                        "description": "Whether reschedule_date is the start or the end",
+                    },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": "How long to wait for the job (default: 60)",
+                        "default": 60,
+                    },
+                },
+                "required": ["blueprint_id", "blueprint_type", "title"],
+            },
+        ),
     ]
+
+
+async def _format_launch(client: WrikeClient, job: dict) -> str:
+    """Describe a finished, failed or still-running blueprint launch."""
+    status = job.get("status")
+    if status in ("InQueue", "InProgress"):
+        return (
+            f"Blueprint launch still running: job `{job.get('id')}` ({status},"
+            f" {job.get('progressPercent', 0)}%). Check again before assuming it succeeded."
+        )
+    if status != "Completed":
+        return f"Blueprint launch {status or 'failed'}: {job.get('errorMessage') or job}"
+
+    result = job.get("result") or {}
+    lines = [f"**Blueprint launched** (job `{job.get('id')}`)"]
+    if result.get("folderId"):
+        folder = await client.get_folder(result["folderId"])
+        lines.append(f"- {_folder_type(folder)}: **{folder.get('title')}** — `{folder['id']}`")
+        if folder.get("permalink"):
+            lines.append(f"- Link: {folder['permalink']}")
+    elif result.get("taskId"):
+        task = await client.get_task(result["taskId"])
+        lines.append(f"- Task: **{task.title}** — `{task.id}`")
+        if task.permalink:
+            lines.append(f"- Link: {task.permalink}")
+    else:
+        lines.append(f"- Result: {result or '(none reported)'}")
+    return "\n".join(lines)
 
 
 async def _format_approval(client: WrikeClient, approval: dict) -> str:
@@ -2551,6 +2656,39 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     heading = "Approval updated"
                 text = await _format_approval(client, approval)
                 return [TextContent(type="text", text=f"**{heading}:**\n\n{text}")]
+
+            elif name == "list_blueprints":
+                kind = arguments.get("blueprint_type", "all")
+                needle = (arguments.get("title_contains") or "").lower()
+                kinds = ["folder", "task"] if kind == "all" else [kind]
+                output = []
+                for k in kinds:
+                    blueprints = await client.list_blueprints(k, arguments.get("space_id"))
+                    rows = [
+                        b for b in blueprints
+                        if b.get("scope") != "BpRoot"
+                        and needle in (b.get("title") or "").lower()
+                    ]
+                    output.append(f"## {k.capitalize()} blueprints ({len(rows)})")
+                    for b in rows:
+                        link = f" | {b['permalink']}" if b.get("permalink") else ""
+                        output.append(f"- **{b.get('title')}** — `{b.get('id')}`{link}")
+                    output.append("")
+                return [TextContent(type="text", text="\n".join(output).strip())]
+
+            elif name == "launch_blueprint":
+                job = await client.launch_blueprint(
+                    kind=arguments["blueprint_type"],
+                    blueprint_id=arguments["blueprint_id"],
+                    title=arguments["title"],
+                    parent_id=arguments.get("parent_id"),
+                    super_task_id=arguments.get("super_task_id"),
+                    title_prefix=arguments.get("title_prefix"),
+                    reschedule_date=arguments.get("reschedule_date"),
+                    reschedule_mode=arguments.get("reschedule_mode"),
+                    timeout=arguments.get("timeout_seconds", 60),
+                )
+                return [TextContent(type="text", text=await _format_launch(client, job))]
 
             elif name == "get_me":
                 me = await client.get_me()
