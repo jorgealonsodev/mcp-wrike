@@ -4,24 +4,30 @@ MCP (Model Context Protocol) server for Wrike project management. Full CRUD supp
 
 ## Features
 
-### Discovery
+### Discovery and navigation
 - **discover_account** — Bootstrap tool: identifies authenticated user, enumerates spaces, lists top-level folders with workflow assignments, catalogues account-level and space-scoped workflows, and optionally includes custom fields and item types
+- **get_me** — The authenticated user: ID, name, email and role
+- **search_users** — Find users and groups by part of a first name, last name or email (case- and accent-insensitive; deleted users only with `include_deleted=true`)
+- **list_spaces** — Spaces you can access, with ID, title and access type
+- **get_item_children** — Direct children of a space, folder, project or task: child folders and projects, then top-level tasks (or a task's subtasks), each with ID, type, status and link. Options: `include_tasks` (default true), `limit` (default 50)
+- **list_folders** — Browse Wrike folders/projects
 
 ### Read
-- **search_tasks** — Search tasks by title or status
+- **search_tasks** — Search tasks; see [Searching tasks](#searching-tasks)
 - **get_task** — Get detailed task information
 - **get_task_comments** — View comments/notes on a task
 - **get_task_attachments** — List task attachments
 - **get_task_full** — Complete view: task + comments + attachments
+- **get_folder_tasks** — List tasks within a folder (supports `recursive=true` to include child folder/project tasks)
+- **get_project** — Project details, including its description
+- **get_workflows** — List all account-level workflows and their custom statuses
+- **get_custom_fields** — List all custom field definitions
+- **get_custom_item_types** — List all custom item type definitions
+- **list_request_forms** — Request forms visible to the token, with field IDs, types and options
 
 Task and project descriptions are returned as raw HTML, so agents can edit wording without losing bold, lists, links, or other formatting.
 
 Checklist items in descriptions must be written as `<input type="checkbox" />` (add `checked="checked"` for a done item). Wrike renders them as native checkboxes; the editor's internal `data-checked` markup is stripped by the API.
-- **get_workflows** — List all account-level workflows and their custom statuses
-- **get_custom_fields** — List all custom field definitions
-- **get_custom_item_types** — List all custom item type definitions
-- **list_folders** — Browse Wrike folders/projects
-- **get_folder_tasks** — List tasks within a folder (supports `recursive=true` to include child folder/project tasks)
 
 ### Write
 - **create_task** — Create tasks with title, description, status, assignees, dates, importance, custom fields, and custom item types
@@ -34,7 +40,73 @@ Checklist items in descriptions must be written as `<input type="checkbox" />` (
 - **create_folder** — Create subfolders
 - **delete_folder** — Delete a folder permanently
 - **delete_space** — Delete a space permanently
+- **create_project** — Create a project inside a folder, with owners, status and custom fields
+- **update_project** — Update a project's title, description, status or custom fields
+- **create_comment** — Add a comment to a task (HTML allowed)
 - **attach_file** — Upload local files as task attachments
+- **submit_request_form** — Submit a request form and wait for Wrike's async job
+
+### Time tracking
+- **create_timelog** — Log hours against a task, with date, comment and category
+- **get_task_timelogs** — Time entries logged on a task
+- **get_timelog_report** — Hours by person and by task, optionally for one folder and a date range
+
+Timelog comments are returned exactly as typed: Wrike sends them HTML-escaped (`+` as `&#43;`), and the server unescapes them.
+
+### Approvals
+- **get_approvals** — Approvals of a task (`task_id`), a folder or project (`folder_id`), or the whole account, with each approver's decision and comment. Filter with `statuses` (`Draft`, `NotRequired`, `Approved`, `Rejected`, `Cancelled`, `Pending`)
+- **create_approval** — Request an approval on a task or folder, with `approvers`, `due_date` and `description`. Without approvers it is saved as a draft. This is a write: Wrike notifies the approvers
+- **update_approval** — Add or remove approvers, change the due date or description, or cancel it with `cancel=true`
+
+### Blueprints
+- **list_blueprints** — Folder and task blueprints, optionally for one space (`space_id`) or by title (`title_contains`)
+- **launch_blueprint** — Create items from a blueprint into `parent_id` (or, for task blueprints, as subtasks of `super_task_id`), with `title`, optional `title_prefix`, and a date shift (`reschedule_date`, `reschedule_mode` = `Start` or `End`). This is a write. It waits for Wrike's async job (`timeout_seconds`, default 60) and returns the new item's ID and link, or the job ID if it is still running
+
+### Not available
+These features of the official Wrike MCP are not in the public REST API v4, so this server does not offer them:
+
+- **Approving or rejecting as the current user.** The approvals API can create, edit and cancel approvals, but has no input for a decision or decision comment.
+- **Inbox / notifications.** No endpoint exists.
+- **Item history.** The only change log is `GET /audit_log`, which is limited to Enterprise admins with the "Create user activity reports" right. `GET /tasks/{id}/tasks_history` covers budget figures only.
+
+## Wrike IDs and links
+
+Every argument that takes a task, folder, project, space or user ID also accepts:
+
+- the numeric ID from a link, e.g. `4614504478`
+- the full link, e.g. `https://www.wrike.com/open.htm?id=4614504478`
+- the official MCP form, e.g. `w:itm:4614504478`
+
+The server converts these with `GET /ids` and caches each conversion for the session. API IDs (e.g. `MAAAAAETC8Ae`) are used as they are. User arguments (`assignees`, `authors`, `approvers`, `add_responsibles`, ...) also accept `me`.
+
+## Searching tasks
+
+`search_tasks` filters combine with AND:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `title` | Title contains |
+| `status` | `Active`, `Completed`, `Deferred` or `Cancelled` |
+| `folder_id` | Only tasks in this folder or project |
+| `assignees` | Assigned to any of these users (IDs, links or `me`) |
+| `authors` | Created by any of these users (IDs, links or `me`) |
+| `due_start`, `due_end` | Due date range (YYYY-MM-DD, inclusive) |
+| `start_start`, `start_end` | Start date range |
+| `completed_start`, `completed_end` | Completion date range |
+| `created_start`, `created_end`, `updated_start`, `updated_end` | Created and updated date ranges |
+| `custom_statuses` | Any of these custom status IDs (see `get_workflows`) |
+| `custom_fields` | `[{id, comparator, value}]`; see below |
+| `importance` | `High`, `Normal` or `Low` |
+| `sort_field`, `sort_order` | `CreatedDate`, `UpdatedDate`, `DueDate` or `CompletedDate`; `Asc` or `Desc` |
+| `limit` | Maximum results (default 50) |
+
+`custom_fields` comparators: `EqualTo` (default), `IsEmpty`, `IsNotEmpty`, `LessThan`, `LessOrEqualTo`, `GreaterThan`, `GreaterOrEqualTo`, `Contains`, `StartsWith`, `EndsWith`, `InRange` and `NotInRange` (with `min_value` and `max_value`), `ContainsAll` and `ContainsAny` (with a list `value`). Bad dates, comparators or importance values are rejected before any request, with the field named in the error.
+
+Examples:
+
+- My overdue tasks: `{"assignees": ["me"], "status": "Active", "due_end": "<today>"}`
+- What Laura completed last week: `{"assignees": ["<Laura's ID from search_users>"], "completed_start": "2026-11-16", "completed_end": "2026-11-22"}`
+- Tasks where a field equals a value: `{"custom_fields": [{"id": "IEAB...", "value": "Acme"}]}`
 
 ## Installation
 
@@ -159,6 +231,11 @@ Once configured, you can ask Claude:
 - "Attach this spec file to the Wrike task"
 - "Show me all tasks in the Engineering folder"
 - "Delete the empty test folder"
+- "Log 30 min on https://www.wrike.com/open.htm?id=4614504478"
+- "Which of my tasks are overdue?"
+- "What's inside this folder?" (with a link)
+- "Request approval from Laura for this task"
+- "Create the project from the onboarding blueprint"
 
 ## License
 
