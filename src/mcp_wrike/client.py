@@ -1413,6 +1413,89 @@ class WrikeClient:
             updated_date=self._parse_datetime(t.get("updatedDate")),
         )
 
+    async def get_approvals(
+        self,
+        task_id: str | None = None,
+        folder_id: str | None = None,
+        statuses: list[str] | None = None,
+    ) -> list[dict]:
+        """Get approvals of a task, of a folder, or of the whole account.
+
+        Args:
+            task_id: Only this task's approvals
+            folder_id: Only this folder or project's approvals
+            statuses: Account-wide only: Draft, NotRequired, Approved,
+                Rejected, Cancelled, Pending
+        """
+        if task_id:
+            data = await self._request("GET", f"/tasks/{task_id}/approvals")
+        elif folder_id:
+            data = await self._request("GET", f"/folders/{folder_id}/approvals")
+        else:
+            params = {"statuses": json.dumps(statuses)} if statuses else None
+            data = await self._request("GET", "/approvals", params=params)
+        approvals = data.get("data", [])
+        if statuses and (task_id or folder_id):
+            approvals = [a for a in approvals if a.get("status") in statuses]
+        return approvals
+
+    async def create_approval(
+        self,
+        task_id: str | None = None,
+        folder_id: str | None = None,
+        approvers: list[str] | None = None,
+        due_date: str | None = None,
+        description: str | None = None,
+    ) -> dict:
+        """Request an approval on a task or folder. Without approvers it is a draft."""
+        if bool(task_id) == bool(folder_id):
+            raise ValueError("Pass exactly one of task_id or folder_id")
+        params: dict[str, str] = {}
+        if approvers:
+            params["approvers"] = json.dumps(approvers)
+        if due_date:
+            params["dueDate"] = _check_date("due_date", due_date)
+        if description:
+            params["description"] = description
+        endpoint = f"/tasks/{task_id}/approvals" if task_id else f"/folders/{folder_id}/approvals"
+        data = await self._request("POST", endpoint, params=params)
+        approvals = data.get("data", [])
+        if not approvals:
+            raise ValueError("Approval creation returned no data")
+        return approvals[0]
+
+    async def update_approval(
+        self,
+        approval_id: str,
+        add_approvers: list[str] | None = None,
+        remove_approvers: list[str] | None = None,
+        due_date: str | None = None,
+        description: str | None = None,
+    ) -> dict:
+        """Change an approval's approvers, due date or description."""
+        params: dict[str, str] = {}
+        if add_approvers:
+            params["addApprovers"] = json.dumps(add_approvers)
+        if remove_approvers:
+            params["removeApprovers"] = json.dumps(remove_approvers)
+        if due_date:
+            params["dueDate"] = _check_date("due_date", due_date)
+        if description is not None:
+            params["description"] = description
+        if not params:
+            raise ValueError("Nothing to update: pass approvers, due_date or description")
+        data = await self._request("PUT", f"/approvals/{approval_id}", params=params)
+        approvals = data.get("data", [])
+        if not approvals:
+            raise ValueError(f"Approval update returned no data for: {approval_id}")
+        return approvals[0]
+
+    async def cancel_approval(self, approval_id: str) -> dict:
+        """Cancel an approval (DELETE /approvals/{id})."""
+        data = await self._request("DELETE", f"/approvals/{approval_id}")
+        approvals = data.get("data", [])
+        return approvals[0] if approvals else {"id": approval_id, "status": "Cancelled"}
+
     async def move_task(
         self,
         task_id: str,

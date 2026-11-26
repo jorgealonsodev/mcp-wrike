@@ -74,7 +74,11 @@ ID_ARGS: dict[str, str] = {
     "owner_ids": "user",
     "assignees": "user",
     "authors": "user",
+    "approvers": "user",
+    "add_approvers": "user",
+    "remove_approvers": "user",
 }
+APPROVAL_STATUSES = ["Draft", "NotRequired", "Approved", "Rejected", "Cancelled", "Pending"]
 ID_HINT = (
     " Accepts the API ID, the numeric ID from the item's link,"
     " or the full link (https://www.wrike.com/open.htm?id=...)."
@@ -1311,7 +1315,116 @@ def _tool_definitions() -> list[Tool]:
                 "required": ["item_id"],
             },
         ),
+        Tool(
+            name="get_approvals",
+            description=(
+                "List Wrike approvals of a task, of a folder or project, or"
+                " (with neither) across the account, with each approver's"
+                " decision and comment. Filter by status."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Only this task's approvals."},
+                    "folder_id": {
+                        "type": "string",
+                        "description": "Only this folder or project's approvals.",
+                    },
+                    "statuses": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": APPROVAL_STATUSES},
+                        "description": "Only approvals in these statuses",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 50)",
+                        "default": 50,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="create_approval",
+            description=(
+                "Request an approval on a task or a folder/project. This is a"
+                " write: Wrike notifies the approvers. Without approvers the"
+                " approval is saved as a draft."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task to approve."},
+                    "folder_id": {
+                        "type": "string",
+                        "description": "Folder or project to approve (instead of task_id).",
+                    },
+                    "approvers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Users who must decide; see search_users.",
+                    },
+                    "due_date": {"type": "string", "description": "Due date (YYYY-MM-DD)"},
+                    "description": {"type": "string", "description": "What to approve"},
+                },
+            },
+        ),
+        Tool(
+            name="update_approval",
+            description=(
+                "Change an approval's approvers, due date or description, or"
+                " cancel it with cancel=true. This is a write."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "approval_id": {
+                        "type": "string",
+                        "description": "Approval ID from get_approvals",
+                    },
+                    "add_approvers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Users to add as approvers.",
+                    },
+                    "remove_approvers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Users to remove as approvers.",
+                    },
+                    "due_date": {"type": "string", "description": "New due date (YYYY-MM-DD)"},
+                    "description": {"type": "string", "description": "New description"},
+                    "cancel": {
+                        "type": "boolean",
+                        "description": "Cancel the approval (other changes are ignored)",
+                        "default": False,
+                    },
+                },
+                "required": ["approval_id"],
+            },
+        ),
     ]
+
+
+async def _format_approval(client: WrikeClient, approval: dict) -> str:
+    """Format an approval with its decisions."""
+    title = approval.get("title") or "Approval"
+    lines = [f"**{title}** — `{approval.get('id')}` | {approval.get('status', 'Unknown')}"]
+    if approval.get("taskId"):
+        lines.append(f"- Task: `{approval['taskId']}`")
+    if approval.get("folderId"):
+        lines.append(f"- Folder: `{approval['folderId']}`")
+    if approval.get("dueDate"):
+        lines.append(f"- Due: {approval['dueDate']}")
+    if approval.get("description"):
+        lines.append(f"- Description: {approval['description']}")
+    decisions = approval.get("decisions") or []
+    if decisions:
+        lines.append("- Decisions:")
+        for d in decisions:
+            name = await _get_user_name(client, d.get("approverId", ""))
+            comment = f" — {d['comment']}" if d.get("comment") else ""
+            lines.append(f"  - {name} (`{d.get('approverId')}`): {d.get('status')}{comment}")
+    return "\n".join(lines)
 
 
 def _contact_name(contact: dict) -> str:
@@ -2393,6 +2506,51 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     _format_task(task, include_description=False),
                 ]
                 return [TextContent(type="text", text="\n".join(output))]
+
+            elif name == "get_approvals":
+                if arguments.get("task_id") and arguments.get("folder_id"):
+                    raise ValueError("Pass task_id or folder_id, not both")
+                approvals = await client.get_approvals(
+                    task_id=arguments.get("task_id"),
+                    folder_id=arguments.get("folder_id"),
+                    statuses=arguments.get("statuses"),
+                )
+                limit = arguments.get("limit", 50)
+                if not approvals:
+                    return [TextContent(type="text", text="No approvals found.")]
+                output = [f"Found {len(approvals)} approvals:\n"]
+                for a in approvals[:limit]:
+                    output.append(await _format_approval(client, a))
+                    output.append("")
+                return [TextContent(type="text", text="\n".join(output))]
+
+            elif name == "create_approval":
+                approval = await client.create_approval(
+                    task_id=arguments.get("task_id"),
+                    folder_id=arguments.get("folder_id"),
+                    approvers=arguments.get("approvers"),
+                    due_date=arguments.get("due_date"),
+                    description=arguments.get("description"),
+                )
+                text = await _format_approval(client, approval)
+                return [TextContent(type="text", text=f"**Approval created:**\n\n{text}")]
+
+            elif name == "update_approval":
+                approval_id = arguments["approval_id"]
+                if arguments.get("cancel"):
+                    approval = await client.cancel_approval(approval_id)
+                    heading = "Approval cancelled"
+                else:
+                    approval = await client.update_approval(
+                        approval_id,
+                        add_approvers=arguments.get("add_approvers"),
+                        remove_approvers=arguments.get("remove_approvers"),
+                        due_date=arguments.get("due_date"),
+                        description=arguments.get("description"),
+                    )
+                    heading = "Approval updated"
+                text = await _format_approval(client, approval)
+                return [TextContent(type="text", text=f"**{heading}:**\n\n{text}")]
 
             elif name == "get_me":
                 me = await client.get_me()
